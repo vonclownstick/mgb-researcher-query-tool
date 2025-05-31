@@ -146,48 +146,128 @@ class SmartPaperSearch:
             metadatas = []
             ids = []
             
-            for pub in publications:
-                pub_id, pmid, title, abstract, journal, pub_date, authors, std_authors, departments = pub
-                
-                # Create rich searchable text
-                title_clean = (title or '').strip()
-                abstract_clean = (abstract or '').strip()
-                
-                # Weight title more heavily by including it multiple times
-                search_text = f"Title: {title_clean}\n{title_clean}\nAbstract: {abstract_clean}\nJournal: {journal or ''}"
-                
-                documents.append(search_text)
-                metadatas.append({
-                    'pub_id': str(pub_id),
-                    'pmid': pmid or '',
-                    'title': title_clean,
-                    'journal': journal or '',
-                    'publication_date': pub_date or '',
-                    'authors': authors or '',
-                    'std_authors': std_authors or '',
-                    'departments': departments or ''
-                })
-                ids.append(f"paper_{pub_id}")
+            def clean_text(text):
+                """Clean text for embedding processing"""
+                if not text:
+                    return ""
+                # Remove or replace problematic characters
+                text = str(text)
+                # Replace null bytes and other control characters
+                text = text.replace('\x00', ' ').replace('\r', ' ').replace('\n', ' ')
+                # Replace multiple spaces with single space
+                text = ' '.join(text.split())
+                # Ensure text is not too long (ChromaDB has limits)
+                if len(text) > 8000:
+                    text = text[:8000] + "..."
+                return text.strip()
             
-            # Add to ChromaDB in batches
-            batch_size = 100
+            def clean_id(pub_id):
+                """Create a clean, valid ChromaDB ID"""
+                # ChromaDB IDs must be strings and match certain patterns
+                clean_id = f"paper_{str(pub_id).replace(' ', '_').replace('-', '_')}"
+                # Remove any invalid characters
+                import re
+                clean_id = re.sub(r'[^a-zA-Z0-9_-]', '_', clean_id)
+                return clean_id
+            
+            valid_count = 0
+            for i, pub in enumerate(publications):
+                try:
+                    pub_id, pmid, title, abstract, journal, pub_date, authors, std_authors, departments = pub
+                    
+                    # Clean and validate all text fields
+                    title_clean = clean_text(title)
+                    abstract_clean = clean_text(abstract)
+                    journal_clean = clean_text(journal)
+                    authors_clean = clean_text(authors)
+                    std_authors_clean = clean_text(std_authors)
+                    departments_clean = clean_text(departments)
+                    
+                    # Skip if no meaningful content
+                    if not title_clean and not abstract_clean:
+                        self.logger.warning(f"Skipping publication {pub_id}: no meaningful content")
+                        continue
+                    
+                    # Create searchable text with length limits
+                    search_text = f"Title: {title_clean}\n{title_clean}\nAbstract: {abstract_clean}\nJournal: {journal_clean}"
+                    search_text = clean_text(search_text)
+                    
+                    if len(search_text) < 10:  # Too short to be useful
+                        self.logger.warning(f"Skipping publication {pub_id}: content too short")
+                        continue
+                    
+                    # Create clean ID
+                    doc_id = clean_id(pub_id)
+                    
+                    documents.append(search_text)
+                    metadatas.append({
+                        'pub_id': str(pub_id),
+                        'pmid': str(pmid) if pmid else '',
+                        'title': title_clean,
+                        'journal': journal_clean,
+                        'publication_date': str(pub_date) if pub_date else '',
+                        'authors': authors_clean,
+                        'std_authors': std_authors_clean,
+                        'departments': departments_clean
+                    })
+                    ids.append(doc_id)
+                    valid_count += 1
+                    
+                    # Progress logging
+                    if valid_count % 100 == 0:
+                        self.logger.info(f"Processed {valid_count}/{len(publications)} publications...")
+                        
+                except Exception as e:
+                    self.logger.warning(f"Error processing publication {pub_id}: {e}")
+                    continue
+            
+            if not documents:
+                self.logger.error("No valid documents to process")
+                return False
+            
+            self.logger.info(f"Adding {len(documents)} valid documents to ChromaDB...")
+            
+            # Add to ChromaDB in smaller batches with error handling
+            batch_size = 50  # Smaller batches to avoid issues
+            added_count = 0
+            
             for i in range(0, len(documents), batch_size):
-                batch_docs = documents[i:i+batch_size]
-                batch_metadata = metadatas[i:i+batch_size]
-                batch_ids = ids[i:i+batch_size]
-                
-                self.collection.add(
-                    documents=batch_docs,
-                    metadatas=batch_metadata,
-                    ids=batch_ids
-                )
+                try:
+                    batch_docs = documents[i:i+batch_size]
+                    batch_metadata = metadatas[i:i+batch_size]
+                    batch_ids = ids[i:i+batch_size]
+                    
+                    # Validate batch before adding
+                    if len(set(batch_ids)) != len(batch_ids):
+                        self.logger.error(f"Duplicate IDs in batch {i//batch_size + 1}")
+                        continue
+                    
+                    self.collection.add(
+                        documents=batch_docs,
+                        metadatas=batch_metadata,
+                        ids=batch_ids
+                    )
+                    
+                    added_count += len(batch_docs)
+                    self.logger.info(f"Added batch {i//batch_size + 1}: {added_count}/{len(documents)} documents")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error adding batch {i//batch_size + 1}: {e}")
+                    # Continue with next batch rather than failing completely
+                    continue
             
-            self.logger.info(f"Added {len(documents)} papers to search database")
+            if added_count == 0:
+                self.logger.error("Failed to add any documents to ChromaDB")
+                return False
+            
+            self.logger.info(f"Successfully added {added_count} papers to search database")
             self._collection_ready = True
             return True
             
         except Exception as e:
             self.logger.error(f"Failed to create paper database: {e}")
+            import traceback
+            self.logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
     
     def search_with_smart_filtering(self, query: str) -> List[Dict]:
