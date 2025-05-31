@@ -632,14 +632,18 @@ async def health():
 # For local development
 if __name__ == "__main__":
     import uvicorn
+    import os
+    
+    # Get port from environment variable (Render sets this) or default to 8000
+    port = int(os.environ.get("PORT", 8000))
     
     db_path = Path(QueryConfig().db_path)
     if not db_path.exists():
         print(f"Database not found at {db_path}")
-        exit(1)
+        print("Note: Database will be created when you click 'Initialize Paper Database'")
     
     print("Starting Smart Paper Search System...")
     print("This searches actual papers but filters authors intelligently")
-    print("Access: http://localhost:8000")
+    print(f"Access: http://localhost:{port}")
     
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
