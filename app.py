@@ -39,8 +39,8 @@ class QueryConfig:
     embeddings_path: str = "./tfidf_embeddings.pkl"
     metadata_path: str = "./paper_metadata.json"
     max_results: int = 5
-    similarity_threshold: float = 0.15  # Lower threshold for TF-IDF
-    min_relevant_papers: int = 2
+    similarity_threshold: float = 0.05  # Much lower for TF-IDF (was 0.15)
+    min_relevant_papers: int = 1  # Allow single-paper authors (was 2)
 
 class TFIDFPaperSearch:
     """TF-IDF based paper search - reliable and fast"""
@@ -370,9 +370,14 @@ class TFIDFPaperSearch:
             # Sort by similarity
             relevant_papers.sort(key=lambda x: x['similarity'], reverse=True)
             
-            self.logger.info(f"Found {len(relevant_papers)} relevant papers")
+            self.logger.info(f"Found {len(relevant_papers)} relevant papers (threshold: {self.config.similarity_threshold})")
+            
+            # Show top papers for debugging
+            for i, paper in enumerate(relevant_papers[:5]):
+                self.logger.info(f"  {i+1}. {paper['title'][:60]}... (sim: {paper['similarity']:.3f})")
             
             if not relevant_papers:
+                self.logger.info("No papers above similarity threshold - try lowering threshold or different keywords")
                 return []
             
             # Group by author and analyze
@@ -394,6 +399,10 @@ class TFIDFPaperSearch:
                 if author.strip():
                     author_papers[author.strip()].append(paper)
         
+        self.logger.info(f"Authors with papers: {len(author_papers)}")
+        for author, papers in list(author_papers.items())[:10]:  # Show first 10
+            self.logger.info(f"  {author}: {len(papers)} papers (avg sim: {sum(p['similarity'] for p in papers)/len(papers):.3f})")
+        
         # Analyze each author
         author_analysis = []
         
@@ -401,6 +410,7 @@ class TFIDFPaperSearch:
             relevant_count = len(papers)
             
             if relevant_count < self.config.min_relevant_papers:
+                self.logger.debug(f"Skipping {author}: only {relevant_count} papers (need {self.config.min_relevant_papers})")
                 continue
             
             # Calculate metrics
@@ -410,10 +420,10 @@ class TFIDFPaperSearch:
             
             # TF-IDF expertise score (adjusted for TF-IDF characteristics)
             # TF-IDF similarities are generally lower than neural embeddings
-            volume_score = min(relevant_count / 8, 1.0)  # Scale for TF-IDF
-            quality_score = min(avg_similarity * 2, 1.0)  # Boost TF-IDF scores
-            high_quality_count = sum(1 for s in similarities if s > 0.3)
-            excellence_bonus = high_quality_count * 0.15
+            volume_score = min(relevant_count / 5, 1.0)  # Scale for TF-IDF (was /8)
+            quality_score = min(avg_similarity * 3, 1.0)  # Boost TF-IDF scores more (was *2)
+            high_quality_count = sum(1 for s in similarities if s > 0.15)  # Lower threshold (was 0.3)
+            excellence_bonus = high_quality_count * 0.2  # Higher bonus (was 0.15)
             
             expertise_score = (
                 volume_score * 0.4 +
@@ -439,6 +449,8 @@ class TFIDFPaperSearch:
                 'high_quality_count': int(high_quality_count),
                 'best_papers': papers[:5]
             })
+            
+            self.logger.info(f"Qualified: {author} - {expertise_score:.3f} score ({relevant_count} papers, avg sim: {avg_similarity:.3f})")
         
         # Sort by expertise score
         author_analysis.sort(key=lambda x: x['expertise_score'], reverse=True)
@@ -583,6 +595,34 @@ async def search(search_request: SearchRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/adjust_thresholds")
+async def adjust_thresholds(
+    similarity_threshold: float = 0.05,
+    min_relevant_papers: int = 1
+):
+    """Temporarily adjust search thresholds for testing"""
+    if paper_search:
+        old_sim = paper_search.config.similarity_threshold
+        old_min = paper_search.config.min_relevant_papers
+        
+        paper_search.config.similarity_threshold = similarity_threshold
+        paper_search.config.min_relevant_papers = min_relevant_papers
+        
+        return {
+            "success": True,
+            "message": f"Thresholds updated",
+            "old_values": {
+                "similarity_threshold": old_sim,
+                "min_relevant_papers": old_min
+            },
+            "new_values": {
+                "similarity_threshold": similarity_threshold,
+                "min_relevant_papers": min_relevant_papers
+            }
+        }
+    else:
+        return {"success": False, "error": "Search system not available"}
 
 @app.get("/debug")
 async def debug_files():
