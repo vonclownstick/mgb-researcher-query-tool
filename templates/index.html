@@ -527,9 +527,6 @@
                 <button type="submit" class="search-button" id="searchButton">
                     Find Researchers by Expertise
                 </button>
-                <button type="button" class="search-button" id="initButton" style="background: linear-gradient(135deg, #28a745, #20c997); margin-top: 10px; display: none;">
-                    Initialize Paper Database (First Time Only)
-                </button>
             </form>
 
             <div class="loading" id="loading">
@@ -540,7 +537,7 @@
             <div class="error-message" id="errorMessage"></div>
 
             <div class="example-queries">
-                <h3>Example queries:</h3>
+                <h3>Example queries (first search will auto-initialize the database):</h3>
                 <div class="example-query" onclick="setQuery('machine learning depression treatment outcomes')">
                     Machine learning for depression treatment outcomes
                 </div>
@@ -575,7 +572,6 @@
         const searchForm = document.getElementById('searchForm');
         const queryInput = document.getElementById('queryInput');
         const searchButton = document.getElementById('searchButton');
-        const initButton = document.getElementById('initButton');
         const loading = document.getElementById('loading');
         const loadingText = document.getElementById('loadingText');
         const errorMessage = document.getElementById('errorMessage');
@@ -618,47 +614,8 @@
             await performSearch();
         });
 
-        initButton.addEventListener('click', async () => {
-            await initializeDatabase();
-        });
-
         function setQuery(query) {
             queryInput.value = query;
-        }
-
-        async function initializeDatabase() {
-            loadingText.textContent = 'Creating paper search database...';
-            loading.style.display = 'flex';
-            initButton.disabled = true;
-            errorMessage.style.display = 'none';
-
-            try {
-                const response = await fetch('/initialize', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    }
-                });
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.detail || 'Initialization failed');
-                }
-
-                if (data.success) {
-                    showSuccess(`✅ Paper search database initialized successfully! You can now search for researchers.`);
-                } else {
-                    throw new Error(data.error || 'Unknown initialization error');
-                }
-
-            } catch (error) {
-                showError(`Initialization failed: ${error.message}`);
-            } finally {
-                loading.style.display = 'none';
-                initButton.disabled = false;
-                loadingText.textContent = 'Searching through research database...';
-            }
         }
 
         async function performSearch() {
@@ -669,8 +626,16 @@
                 return;
             }
 
-            // Show loading state
-            loadingText.textContent = 'Searching through research database...';
+            // Show loading state - check if this might be first search
+            const healthResponse = await fetch('/health').catch(() => null);
+            const healthData = healthResponse ? await healthResponse.json().catch(() => {}) : {};
+            
+            if (healthData.collection_ready === false) {
+                loadingText.textContent = 'Initializing search database (first time setup)...';
+            } else {
+                loadingText.textContent = 'Searching through research database...';
+            }
+            
             loading.style.display = 'flex';
             searchButton.disabled = true;
             errorMessage.style.display = 'none';
@@ -703,7 +668,7 @@
 
             } catch (error) {
                 if (error.message.includes('not found')) {
-                    showError('Paper database not initialized. Please click "Initialize Paper Database" first.');
+                    showError('Database not available. Please check if the system is properly configured.');
                 } else {
                     showError(error.message);
                 }
@@ -742,7 +707,7 @@
                 resultsContainer.innerHTML = `
                     <div class="researcher-card">
                         <p>No researchers found with matching expertise. Try rephrasing your search or using broader terms.</p>
-                        <p><em>Note: Make sure you've initialized the paper database first.</em></p>
+                        <p><em>Note: The search database auto-initializes on first use and may take a moment.</em></p>
                     </div>
                 `;
             } else {

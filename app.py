@@ -2,7 +2,7 @@
 
 """
 Smart Paper Search with Author Filtering - FastAPI Version for Render
-Searches actual papers but filters authors intelligently
+Searches actual papers but filters authors intelligently - AUTO INITIALIZATION
 """
 
 import sqlite3
@@ -48,9 +48,19 @@ class SmartPaperSearch:
     
     def __init__(self, config: QueryConfig):
         self.config = config
+        self._collection_ready = False
         self._setup_logging()
         self._initialize_models()
         self._setup_vector_db()
+        self._check_database()
+    
+    def _check_database(self):
+        """Check if database exists and log status"""
+        if not Path(self.config.db_path).exists():
+            self.logger.warning(f"Database not found at {self.config.db_path}")
+            self.logger.info("Database will need to be created via /initialize endpoint")
+        else:
+            self.logger.info(f"Database found at {self.config.db_path}")
     
     def _setup_logging(self):
         logging.basicConfig(level=logging.INFO)
@@ -60,10 +70,11 @@ class SmartPaperSearch:
         try:
             self.logger.info("Loading embedding model...")
             self.embedding_model = SentenceTransformer(self.config.embedding_model)
-            self.logger.info("Embedding model loaded")
+            self.logger.info("Embedding model loaded successfully")
         except Exception as e:
             self.logger.error(f"Failed to load embedding model: {e}")
-            raise
+            # Don't raise here - let the app start and show a better error message
+            self.embedding_model = None
     
     def _setup_vector_db(self):
         try:
@@ -71,16 +82,29 @@ class SmartPaperSearch:
             try:
                 self.collection = self.chroma_client.get_collection("paper_abstracts")
                 self.logger.info("Connected to existing paper collection")
+                self._collection_ready = True
             except:
                 self.collection = None
-                self.logger.info("Paper collection not found, will create when needed")
+                self._collection_ready = False
+                self.logger.info("Paper collection not found, will auto-initialize on first search")
         except Exception as e:
             self.logger.error(f"Failed to setup ChromaDB: {e}")
             self.collection = None
+            self._collection_ready = False
     
     def create_paper_database(self):
         """Create searchable database of paper abstracts"""
         try:
+            # Check if database file exists
+            if not Path(self.config.db_path).exists():
+                self.logger.error(f"SQLite database not found at {self.config.db_path}")
+                return False
+                
+            # Check if embedding model is available
+            if not self.embedding_model:
+                self.logger.error("Embedding model not available")
+                return False
+                
             self.logger.info("Creating paper search database...")
             
             # Delete existing collection
@@ -111,6 +135,10 @@ class SmartPaperSearch:
                 ''')
                 publications = cursor.fetchall()
             
+            if not publications:
+                self.logger.error("No publications found in database")
+                return False
+                
             self.logger.info(f"Processing {len(publications)} publications...")
             
             # Prepare documents for embedding
@@ -155,6 +183,7 @@ class SmartPaperSearch:
                 )
             
             self.logger.info(f"Added {len(documents)} papers to search database")
+            self._collection_ready = True
             return True
             
         except Exception as e:
@@ -162,8 +191,23 @@ class SmartPaperSearch:
             return False
     
     def search_with_smart_filtering(self, query: str) -> List[Dict]:
-        """Search papers with intelligent author filtering"""
+        """Search papers with intelligent author filtering - auto-initializes if needed"""
+        if not self.embedding_model:
+            self.logger.error("Embedding model not loaded")
+            return []
+        
+        # Auto-initialize if collection doesn't exist
+        if not self._collection_ready:
+            self.logger.info("Auto-initializing paper database for first search...")
+            if self.create_paper_database():
+                self._collection_ready = True
+                self.logger.info("Auto-initialization successful")
+            else:
+                self.logger.error("Auto-initialization failed")
+                return []
+            
         if not self.collection:
+            self.logger.error("Paper collection not available")
             return []
         
         try:
@@ -529,8 +573,14 @@ app = FastAPI(title="MGH/BWH/MGB Researcher Query Tool", version="1.0.0")
 # Set up templates directory
 templates = Jinja2Templates(directory="templates")
 
-# Initialize the search system
-paper_search = SmartPaperSearch(QueryConfig())
+# Initialize the search system with error handling
+try:
+    paper_search = SmartPaperSearch(QueryConfig())
+    print("✓ SmartPaperSearch initialized successfully")
+except Exception as e:
+    print(f"✗ Failed to initialize SmartPaperSearch: {e}")
+    # Create a dummy object so the app can still start
+    paper_search = None
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -539,31 +589,45 @@ async def index(request: Request):
 
 @app.post("/initialize")
 async def initialize_paper_db():
-    """Initialize the paper database"""
+    """Initialize the paper database (optional - auto-initializes on first search)"""
     try:
+        if not paper_search:
+            return InitializeResponse(
+                success=False,
+                error="Search system not properly initialized. Check server logs."
+            )
+            
         success = paper_search.create_paper_database()
         if success:
+            paper_search._collection_ready = True
             return InitializeResponse(
                 success=True, 
-                message="Paper search database created successfully"
+                message="Paper search database initialized successfully"
             )
         else:
             return InitializeResponse(
                 success=False, 
-                error="Failed to create paper database"
+                error="Failed to create paper database. Check if SQLite database file exists."
             )
     except Exception as e:
         return InitializeResponse(success=False, error=str(e))
 
 @app.post("/search")
 async def search(search_request: SearchRequest):
-    """Search for researchers based on query"""
+    """Search for researchers based on query - auto-initializes if needed"""
     try:
+        if not paper_search:
+            raise HTTPException(
+                status_code=503, 
+                detail="Search system not properly initialized. Check server logs."
+            )
+            
         query = search_request.query.strip()
         
         if not query:
             raise HTTPException(status_code=400, detail="Query is required")
         
+        # This will auto-initialize if needed
         results = paper_search.search_with_smart_filtering(query)
         
         # Clean results for JSON serialization
@@ -627,23 +691,12 @@ async def search(search_request: SearchRequest):
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "healthy"}
-
-# For local development
-if __name__ == "__main__":
-    import uvicorn
-    import os
-    
-    # Get port from environment variable (Render sets this) or default to 8000
-    port = int(os.environ.get("PORT", 8000))
-    
-    db_path = Path(QueryConfig().db_path)
-    if not db_path.exists():
-        print(f"Database not found at {db_path}")
-        print("Note: Database will be created when you click 'Initialize Paper Database'")
-    
-    print("Starting Smart Paper Search System...")
-    print("This searches actual papers but filters authors intelligently")
-    print(f"Access: http://localhost:{port}")
-    
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+    collection_ready = paper_search._collection_ready if paper_search else False
+    return {
+        "status": "healthy",
+        "search_system_available": paper_search is not None,
+        "database_path": QueryConfig().db_path,
+        "database_exists": os.path.exists(QueryConfig().db_path),
+        "collection_ready": collection_ready,
+        "auto_initialization": "enabled"
+    }
