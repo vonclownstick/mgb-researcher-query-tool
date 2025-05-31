@@ -537,7 +537,7 @@
             <div class="error-message" id="errorMessage"></div>
 
             <div class="example-queries">
-                <h3>Example queries (first search will auto-initialize the database):</h3>
+                <h3>Example queries:</h3>
                 <div class="example-query" onclick="setQuery('machine learning depression treatment outcomes')">
                     Machine learning for depression treatment outcomes
                 </div>
@@ -707,7 +707,7 @@
                 resultsContainer.innerHTML = `
                     <div class="researcher-card">
                         <p>No researchers found with matching expertise. Try rephrasing your search or using broader terms.</p>
-                        <p><em>Note: The search database auto-initializes on first use and may take a moment.</em></p>
+                        <p><em>Note: If this is a new deployment, the search database may need to be built.</em></p>
                     </div>
                 `;
             } else {

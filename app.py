@@ -61,26 +61,79 @@ class TFIDFPaperSearch:
     def _load_existing_data(self):
         """Load existing TF-IDF vectorizer and embeddings if available"""
         try:
+            # Debug: Check what files exist
+            self.logger.info(f"Looking for TF-IDF files:")
+            self.logger.info(f"  Vectorizer: {self.config.vectorizer_path} - {'EXISTS' if Path(self.config.vectorizer_path).exists() else 'MISSING'}")
+            self.logger.info(f"  Embeddings: {self.config.embeddings_path} - {'EXISTS' if Path(self.config.embeddings_path).exists() else 'MISSING'}")
+            self.logger.info(f"  Metadata: {self.config.metadata_path} - {'EXISTS' if Path(self.config.metadata_path).exists() else 'MISSING'}")
+            
+            # List all files in current directory for debugging
+            current_files = list(Path('.').glob('*'))
+            self.logger.info(f"Files in current directory: {[f.name for f in current_files if f.is_file()]}")
+            
             if (Path(self.config.vectorizer_path).exists() and 
                 Path(self.config.embeddings_path).exists() and 
                 Path(self.config.metadata_path).exists()):
                 
-                self.logger.info("Loading existing TF-IDF search data...")
+                self.logger.info("All TF-IDF files found - loading...")
                 
-                with open(self.config.vectorizer_path, 'rb') as f:
-                    self.vectorizer = pickle.load(f)
+                # Load vectorizer
+                try:
+                    with open(self.config.vectorizer_path, 'rb') as f:
+                        self.vectorizer = pickle.load(f)
+                    self.logger.info("✅ Vectorizer loaded successfully")
+                except Exception as e:
+                    self.logger.error(f"Failed to load vectorizer: {e}")
+                    return False
                 
-                with open(self.config.embeddings_path, 'rb') as f:
-                    self.paper_embeddings = pickle.load(f)
+                # Verify vectorizer is properly fitted
+                if not hasattr(self.vectorizer, 'idf_'):
+                    self.logger.warning("Loaded vectorizer is not fitted - missing idf_ attribute")
+                    return False
                 
-                with open(self.config.metadata_path, 'r') as f:
-                    self.paper_metadata = json.load(f)
+                self.logger.info(f"✅ Vectorizer has {len(self.vectorizer.get_feature_names_out())} features")
                 
-                self._collection_ready = True
-                self.logger.info(f"Loaded TF-IDF search data with {len(self.paper_metadata)} papers")
-                return True
+                # Load embeddings
+                try:
+                    with open(self.config.embeddings_path, 'rb') as f:
+                        self.paper_embeddings = pickle.load(f)
+                    self.logger.info(f"✅ Embeddings loaded - shape: {self.paper_embeddings.shape}")
+                except Exception as e:
+                    self.logger.error(f"Failed to load embeddings: {e}")
+                    return False
+                
+                # Load metadata
+                try:
+                    with open(self.config.metadata_path, 'r') as f:
+                        self.paper_metadata = json.load(f)
+                    self.logger.info(f"✅ Metadata loaded - {len(self.paper_metadata)} papers")
+                except Exception as e:
+                    self.logger.error(f"Failed to load metadata: {e}")
+                    return False
+                
+                # Verify data consistency
+                if (len(self.paper_metadata) != self.paper_embeddings.shape[0]):
+                    self.logger.error(f"Data size mismatch: metadata={len(self.paper_metadata)}, embeddings={self.paper_embeddings.shape[0]}")
+                    return False
+                
+                # Test the vectorizer
+                try:
+                    test_vector = self.vectorizer.transform(["test query"])
+                    self.logger.info(f"✅ Vectorizer test successful - output shape: {test_vector.shape}")
+                    
+                    self._collection_ready = True
+                    self.logger.info(f"🚀 TF-IDF system ready with {len(self.paper_metadata)} papers")
+                    return True
+                except Exception as e:
+                    self.logger.error(f"Vectorizer test failed: {e}")
+                    return False
+            else:
+                self.logger.info("❌ TF-IDF files not found - will need to build database")
+                
         except Exception as e:
-            self.logger.info(f"No existing TF-IDF search data found: {e}")
+            self.logger.error(f"Failed to load existing TF-IDF data: {e}")
+            import traceback
+            self.logger.error(f"Load traceback: {traceback.format_exc()}")
         
         return False
     
@@ -179,6 +232,10 @@ class TFIDFPaperSearch:
                 self.logger.error("No valid documents to process")
                 return False
             
+            if len(documents) < 10:
+                self.logger.error(f"Too few documents ({len(documents)}) for reliable TF-IDF")
+                return False
+            
             self.logger.info(f"Creating TF-IDF vectors for {len(documents)} documents...")
             
             # Create TF-IDF vectorizer with optimized settings
@@ -193,23 +250,52 @@ class TFIDFPaperSearch:
             )
             
             # Fit and transform documents
-            self.paper_embeddings = self.vectorizer.fit_transform(documents)
-            self.paper_metadata = metadata
+            try:
+                self.paper_embeddings = self.vectorizer.fit_transform(documents)
+                self.paper_metadata = metadata
+                
+                # Verify vectorizer is properly fitted
+                if not hasattr(self.vectorizer, 'idf_'):
+                    self.logger.error("Vectorizer fitting failed - no IDF computed")
+                    return False
+                
+                self.logger.info(f"TF-IDF vectorizer fitted with {len(self.vectorizer.get_feature_names_out())} features")
+                
+            except Exception as e:
+                self.logger.error(f"Failed to fit TF-IDF vectorizer: {e}")
+                return False
             
-            # Save the vectorizer and embeddings
-            self.logger.info("Saving TF-IDF search data to disk...")
-            
-            with open(self.config.vectorizer_path, 'wb') as f:
-                pickle.dump(self.vectorizer, f)
-            
-            with open(self.config.embeddings_path, 'wb') as f:
-                pickle.dump(self.paper_embeddings, f)
-            
-            with open(self.config.metadata_path, 'w') as f:
-                json.dump(self.paper_metadata, f)
+            # Save the vectorizer and embeddings for future use
+            try:
+                self.logger.info("Saving TF-IDF search data to disk...")
+                
+                with open(self.config.vectorizer_path, 'wb') as f:
+                    pickle.dump(self.vectorizer, f)
+                
+                with open(self.config.embeddings_path, 'wb') as f:
+                    pickle.dump(self.paper_embeddings, f)
+                
+                with open(self.config.metadata_path, 'w') as f:
+                    json.dump(self.paper_metadata, f)
+                    
+                self.logger.info("TF-IDF search data saved successfully")
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to save TF-IDF data: {e}")
+                # Continue anyway since we have it in memory
             
             self._collection_ready = True
-            self.logger.info(f"Created TF-IDF search database with {len(documents)} papers")
+            self.logger.info(f"✅ Created TF-IDF search database with {len(documents)} papers")
+            
+            # Test the vectorizer
+            try:
+                test_query = "machine learning"
+                test_vector = self.vectorizer.transform([test_query])
+                self.logger.info(f"✅ TF-IDF vectorizer test successful (query: '{test_query}')")
+            except Exception as e:
+                self.logger.error(f"TF-IDF vectorizer test failed: {e}")
+                return False
+            
             return True
             
         except Exception as e:
@@ -235,8 +321,27 @@ class TFIDFPaperSearch:
                     self.logger.error("Auto-initialization failed")
                     return []
         
-        if not self.vectorizer or self.paper_embeddings is None:
-            self.logger.error("TF-IDF search system not initialized")
+        # Double-check that vectorizer is properly fitted
+        if not self.vectorizer:
+            self.logger.error("TF-IDF vectorizer not available")
+            return []
+            
+        if not hasattr(self.vectorizer, 'idf_'):
+            self.logger.error("TF-IDF vectorizer not fitted - rebuilding...")
+            # Try to rebuild
+            if not os.environ.get("PORT"):  # Only in local environment
+                if self.create_paper_database():
+                    self._collection_ready = True
+                    self.logger.info("Rebuild successful")
+                else:
+                    self.logger.error("Rebuild failed")
+                    return []
+            else:
+                self.logger.error("Cannot rebuild in deployment environment")
+                return []
+        
+        if self.paper_embeddings is None:
+            self.logger.error("Paper embeddings not available")
             return []
         
         try:
@@ -275,6 +380,8 @@ class TFIDFPaperSearch:
             
         except Exception as e:
             self.logger.error(f"TF-IDF search failed: {e}")
+            import traceback
+            self.logger.error(f"Search traceback: {traceback.format_exc()}")
             return []
     
     def _analyze_author_relevance(self, relevant_papers: List[Dict], query: str) -> List[Dict]:
@@ -415,26 +522,39 @@ except Exception as e:
     print(f"✗ Failed to initialize TF-IDF Paper Search: {e}")
     paper_search = None
 
+# For local development
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    
+    # Get port from environment variable (Render sets this) or default to 8000
+    port = int(os.environ.get("PORT", 8000))
+    
+    print("🚀 Starting TF-IDF Paper Search System...")
+    print(f"📍 Access: http://localhost:{port}")
+    
+    if paper_search and paper_search._collection_ready:
+        print(f"✅ Search ready with {len(paper_search.paper_metadata)} papers")
+    else:
+        print("⚠️  Search database needs initialization")
+    
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/initialize")
 async def initialize_paper_db():
-    """Initialize the TF-IDF database (optional - for local development)"""
+    """Initialize the TF-IDF database (force rebuild)"""
     try:
         if not paper_search:
             return InitializeResponse(success=False, error="Search system not initialized")
         
-        # Check if we're in deployment
-        if os.environ.get("PORT"):
-            return InitializeResponse(
-                success=False,
-                error="Database initialization disabled in deployment. Please build locally and include in repository."
-            )
-        
+        # Force rebuild even in deployment if explicitly requested
         success = paper_search.create_paper_database()
         if success:
+            paper_search._collection_ready = True
             return InitializeResponse(success=True, message="TF-IDF search database created successfully")
         else:
             return InitializeResponse(success=False, error="Failed to create search database")
@@ -464,8 +584,93 @@ async def search(search_request: SearchRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/debug")
+async def debug_files():
+    """Debug endpoint to check file status"""
+    config = QueryConfig()
+    
+    def get_file_info(path):
+        p = Path(path)
+        if p.exists():
+            size_mb = p.stat().st_size / (1024 * 1024)
+            return {"exists": True, "size_mb": round(size_mb, 2)}
+        else:
+            return {"exists": False, "size_mb": 0}
+    
+    # List all files in current directory
+    current_files = []
+    for f in Path('.').iterdir():
+        if f.is_file():
+            size_mb = f.stat().st_size / (1024 * 1024)
+            current_files.append({
+                "name": f.name,
+                "size_mb": round(size_mb, 2)
+            })
+    
+@app.get("/debug")
+async def debug_files():
+    """Debug endpoint to check file status"""
+    config = QueryConfig()
+    
+    def get_file_info(path):
+        p = Path(path)
+        if p.exists():
+            size_mb = p.stat().st_size / (1024 * 1024)
+            return {"exists": True, "size_mb": round(size_mb, 2)}
+        else:
+            return {"exists": False, "size_mb": 0}
+    
+    # List all files in current directory
+    current_files = []
+    for f in Path('.').iterdir():
+        if f.is_file():
+            size_mb = f.stat().st_size / (1024 * 1024)
+            current_files.append({
+                "name": f.name,
+                "size_mb": round(size_mb, 2)
+            })
+    
+    return {
+        "tfidf_files": {
+            "vectorizer": get_file_info(config.vectorizer_path),
+            "embeddings": get_file_info(config.embeddings_path),
+            "metadata": get_file_info(config.metadata_path)
+        },
+        "sqlite_database": get_file_info(config.db_path),
+        "all_files": sorted(current_files, key=lambda x: x['name']),
+        "search_system_status": {
+            "initialized": paper_search is not None,
+            "collection_ready": paper_search._collection_ready if paper_search else False,
+            "has_vectorizer": paper_search.vectorizer is not None if paper_search else False,
+            "has_embeddings": paper_search.paper_embeddings is not None if paper_search else False,
+            "has_metadata": paper_search.paper_metadata is not None if paper_search else False
+        }
+    }
+
 @app.get("/health")
 async def health():
+    """Health check endpoint"""
+    collection_ready = paper_search._collection_ready if paper_search else False
+    is_deployment = bool(os.environ.get("PORT"))
+    
+    # Check if we have pre-built TF-IDF files
+    has_prebuilt = (
+        Path(QueryConfig().vectorizer_path).exists() and
+        Path(QueryConfig().embeddings_path).exists() and
+        Path(QueryConfig().metadata_path).exists()
+    )
+    
+    return {
+        "status": "healthy",
+        "search_system_available": paper_search is not None,
+        "search_type": "tfidf",
+        "database_path": QueryConfig().db_path,
+        "database_exists": os.path.exists(QueryConfig().db_path),
+        "collection_ready": collection_ready,
+        "is_deployment": is_deployment,
+        "has_prebuilt_database": has_prebuilt,
+        "auto_initialization": "disabled_in_deployment" if is_deployment else "enabled_locally"
+    }
     """Health check endpoint"""
     collection_ready = paper_search._collection_ready if paper_search else False
     is_deployment = bool(os.environ.get("PORT"))
