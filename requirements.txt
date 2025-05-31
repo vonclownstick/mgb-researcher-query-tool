@@ -1,10 +1,3 @@
-# CPU-only PyTorch first (this prevents CUDA installation)
---index-url https://download.pytorch.org/whl/cpu
-torch==2.1.0+cpu
-torchvision==0.16.0+cpu
-torchaudio==0.16.0+cpu
-
-# Then other dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 jinja2==3.1.2
