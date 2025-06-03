@@ -36,7 +36,7 @@ class QueryConfig:
     embeddings_path: str = "./all-MiniLM-L6-v2_embeddings.pkl"
     metadata_path: str = "./paper_metadata.json"
     max_results: int = 5
-    similarity_threshold: float = 0.55  # Adjusted for SentenceTransformer embeddings (typically higher than TF-IDF)
+    similarity_threshold: float = 0.4  # Adjusted for SentenceTransformer embeddings (typically higher than TF-IDF)
     min_relevant_papers: int = 1  # Allow single-paper authors
 
 class EmbeddingPaperSearch: # Class name remains the same
@@ -230,12 +230,12 @@ class EmbeddingPaperSearch: # Class name remains the same
             # These similarities are typically higher than TF-IDF
             volume_score = min(relevant_count / 8, 1.0)  # Scale based on number of relevant papers
             quality_score = min(avg_similarity * 2, 1.0)  # Weight by average similarity
-            high_quality_count = sum(1 for s in similarities if s > 0.7) # Count papers with very high similarity
-            excellence_bonus = high_quality_count * 0.15 # Bonus for highly relevant papers
+            high_quality_count = sum(1 for s in similarities if s > 0.6) # Count papers with very high similarity
+            excellence_bonus = high_quality_count * 0.1 # Bonus for highly relevant papers
             
             expertise_score = (
-                volume_score * 0.4 +
-                quality_score * 0.5 +
+                volume_score * 0.5 +
+                quality_score * 0.4 +
                 excellence_bonus
             )
             
@@ -442,7 +442,7 @@ async def search(search_request: SearchRequest):
 
 @app.post("/adjust_thresholds")
 async def adjust_thresholds(
-    similarity_threshold: float = 0.55, # Default adjusted for embeddings
+    similarity_threshold: float = 0.4, # Default adjusted for embeddings
     min_relevant_papers: int = 1
 ):
     """Temporarily adjust search thresholds for testing"""
