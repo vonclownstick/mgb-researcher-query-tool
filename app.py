@@ -541,4 +541,3 @@ async def health():
         "has_prebuilt_database": has_prebuilt,
         "auto_initialization": "disabled_in_deployment" # Embeddings are always pre-built
     }
-    }
