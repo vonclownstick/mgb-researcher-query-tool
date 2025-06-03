@@ -3,6 +3,7 @@
 """
 Smart Paper Search with TF-IDF - Reliable FastAPI Version
 No ChromaDB dependencies, uses scikit-learn for fast keyword search
+NOW WITH LLM THEMES!
 """
 
 import sqlite3
@@ -492,10 +493,12 @@ class TFIDFPaperSearch:
             return 0
     
     def _get_author_details(self, standardized_name: str) -> Optional[Dict]:
-        """Get author details"""
+        """Get author details including LLM-generated themes"""
         try:
             with sqlite3.connect(self.config.db_path) as conn:
                 cursor = conn.cursor()
+                
+                # Get basic author info
                 cursor.execute('''
                     SELECT name, standardized_name, department, total_publications
                     FROM authors 
@@ -506,20 +509,54 @@ class TFIDFPaperSearch:
                 result = cursor.fetchone()
                 if result:
                     name, std_name, department, total_pubs = result
+                    
+                    # Get LLM-generated themes if available
+                    cursor.execute('''
+                        SELECT themes, summary
+                        FROM author_themes at
+                        JOIN authors a ON at.author_id = a.id
+                        WHERE a.standardized_name = ?
+                        LIMIT 1
+                    ''', (standardized_name,))
+                    
+                    theme_result = cursor.fetchone()
+                    
+                    if theme_result and theme_result[0]:
+                        # Parse themes from pipe-separated string
+                        themes_text, summary = theme_result
+                        theme_list = themes_text.split('|') if themes_text else []
+                        
+                        # Clean and validate themes
+                        clean_themes = []
+                        for theme in theme_list:
+                            theme = theme.strip()
+                            if theme and len(theme) > 5:  # Basic validation
+                                clean_themes.append(theme)
+                        
+                        llm_themes = {
+                            'themes': clean_themes,
+                            'summary': summary or 'LLM-generated research themes available',
+                            'llm_analyzed': True,
+                            'available': True
+                        }
+                    else:
+                        # No themes generated yet
+                        llm_themes = {
+                            'themes': [],
+                            'summary': 'Research themes not yet generated for this investigator',
+                            'llm_analyzed': False,
+                            'available': False
+                        }
+                    
                     return {
                         'name': str(name or ''),
                         'standardized_name': str(std_name or ''),
                         'department': str(department or ''),
                         'total_publications': int(total_pubs or 0),
-                        'llm_themes': {
-                            'themes': [],
-                            'summary': 'TF-IDF keyword search - fast and reliable',
-                            'llm_analyzed': False,
-                            'available': False
-                        }
+                        'llm_themes': llm_themes
                     }
         except Exception as e:
-            self.logger.error(f"Failed to get author details: {e}")
+            self.logger.error(f"Failed to get author details for {standardized_name}: {e}")
         return None
 
 # Initialize FastAPI
@@ -647,29 +684,6 @@ async def debug_files():
                 "size_mb": round(size_mb, 2)
             })
     
-@app.get("/debug")
-async def debug_files():
-    """Debug endpoint to check file status"""
-    config = QueryConfig()
-    
-    def get_file_info(path):
-        p = Path(path)
-        if p.exists():
-            size_mb = p.stat().st_size / (1024 * 1024)
-            return {"exists": True, "size_mb": round(size_mb, 2)}
-        else:
-            return {"exists": False, "size_mb": 0}
-    
-    # List all files in current directory
-    current_files = []
-    for f in Path('.').iterdir():
-        if f.is_file():
-            size_mb = f.stat().st_size / (1024 * 1024)
-            current_files.append({
-                "name": f.name,
-                "size_mb": round(size_mb, 2)
-            })
-    
     return {
         "tfidf_files": {
             "vectorizer": get_file_info(config.vectorizer_path),
@@ -689,28 +703,6 @@ async def debug_files():
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
-    collection_ready = paper_search._collection_ready if paper_search else False
-    is_deployment = bool(os.environ.get("PORT"))
-    
-    # Check if we have pre-built TF-IDF files
-    has_prebuilt = (
-        Path(QueryConfig().vectorizer_path).exists() and
-        Path(QueryConfig().embeddings_path).exists() and
-        Path(QueryConfig().metadata_path).exists()
-    )
-    
-    return {
-        "status": "healthy",
-        "search_system_available": paper_search is not None,
-        "search_type": "tfidf",
-        "database_path": QueryConfig().db_path,
-        "database_exists": os.path.exists(QueryConfig().db_path),
-        "collection_ready": collection_ready,
-        "is_deployment": is_deployment,
-        "has_prebuilt_database": has_prebuilt,
-        "auto_initialization": "disabled_in_deployment" if is_deployment else "enabled_locally"
-    }
     """Health check endpoint"""
     collection_ready = paper_search._collection_ready if paper_search else False
     is_deployment = bool(os.environ.get("PORT"))
