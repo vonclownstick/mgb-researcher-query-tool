@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-
-"""
-Smart Paper Search with TF-IDF - Reliable FastAPI Version
-No ChromaDB dependencies, uses scikit-learn for fast keyword search
-NOW WITH LLM THEMES!
-"""
-
 import sqlite3
 import logging
 import os
@@ -20,8 +12,11 @@ from pydantic import BaseModel
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+
+# New imports for SentenceTransformers and PyNNDescent
+from sentence_transformers import SentenceTransformer
+import pynndescent
+from sklearn.metrics.pairwise import cosine_similarity # Still used for calculating similarity from embeddings
 
 # Pydantic models for request/response
 class SearchRequest(BaseModel):
@@ -36,22 +31,24 @@ class InitializeResponse(BaseModel):
 class QueryConfig:
     """Configuration for the query tool"""
     db_path: str = "mgh_bwh_psychiatry_research.db"
-    vectorizer_path: str = "./tfidf_vectorizer.pkl"
-    embeddings_path: str = "./tfidf_embeddings.pkl"
+    # Updated paths for SentenceTransformer model and embeddings
+    model_path: str = "./all-MiniLM-L6-v2_model"
+    embeddings_path: str = "./all-MiniLM-L6-v2_embeddings.pkl"
     metadata_path: str = "./paper_metadata.json"
     max_results: int = 5
-    similarity_threshold: float = 0.05  # Much lower for TF-IDF (was 0.15)
-    min_relevant_papers: int = 1  # Allow single-paper authors (was 2)
+    similarity_threshold: float = 0.4  # Adjusted for SentenceTransformer embeddings (typically higher than TF-IDF)
+    min_relevant_papers: int = 1  # Allow single-paper authors
 
-class TFIDFPaperSearch:
-    """TF-IDF based paper search - reliable and fast"""
+class EmbeddingPaperSearch:
+    """Sentence-Transformer embedding based paper search - reliable and fast"""
     
     def __init__(self, config: QueryConfig):
         self.config = config
         self._setup_logging()
-        self.vectorizer = None
+        self.embedding_model = None
         self.paper_embeddings = None
         self.paper_metadata = None
+        self.pynndescent_index = None # PyNNDescent index
         self._collection_ready = False
         self._load_existing_data()
     
@@ -60,11 +57,10 @@ class TFIDFPaperSearch:
         self.logger = logging.getLogger(__name__)
     
     def _load_existing_data(self):
-        """Load existing TF-IDF vectorizer and embeddings if available"""
+        """Load existing SentenceTransformer model, embeddings, and build PyNNDescent index"""
         try:
-            # Debug: Check what files exist
-            self.logger.info(f"Looking for TF-IDF files:")
-            self.logger.info(f"  Vectorizer: {self.config.vectorizer_path} - {'EXISTS' if Path(self.config.vectorizer_path).exists() else 'MISSING'}")
+            self.logger.info(f"Looking for embedding files:")
+            self.logger.info(f"  Model directory: {self.config.model_path} - {'EXISTS' if Path(self.config.model_path).exists() else 'MISSING'}")
             self.logger.info(f"  Embeddings: {self.config.embeddings_path} - {'EXISTS' if Path(self.config.embeddings_path).exists() else 'MISSING'}")
             self.logger.info(f"  Metadata: {self.config.metadata_path} - {'EXISTS' if Path(self.config.metadata_path).exists() else 'MISSING'}")
             
@@ -72,27 +68,19 @@ class TFIDFPaperSearch:
             current_files = list(Path('.').glob('*'))
             self.logger.info(f"Files in current directory: {[f.name for f in current_files if f.is_file()]}")
             
-            if (Path(self.config.vectorizer_path).exists() and 
+            if (Path(self.config.model_path).exists() and 
                 Path(self.config.embeddings_path).exists() and 
                 Path(self.config.metadata_path).exists()):
                 
-                self.logger.info("All TF-IDF files found - loading...")
+                self.logger.info("All embedding files found - loading...")
                 
-                # Load vectorizer
+                # Load SentenceTransformer model
                 try:
-                    with open(self.config.vectorizer_path, 'rb') as f:
-                        self.vectorizer = pickle.load(f)
-                    self.logger.info("✅ Vectorizer loaded successfully")
+                    self.embedding_model = SentenceTransformer(self.config.model_path)
+                    self.logger.info("✅ SentenceTransformer model loaded successfully")
                 except Exception as e:
-                    self.logger.error(f"Failed to load vectorizer: {e}")
+                    self.logger.error(f"Failed to load SentenceTransformer model from {self.config.model_path}: {e}")
                     return False
-                
-                # Verify vectorizer is properly fitted
-                if not hasattr(self.vectorizer, 'idf_'):
-                    self.logger.warning("Loaded vectorizer is not fitted - missing idf_ attribute")
-                    return False
-                
-                self.logger.info(f"✅ Vectorizer has {len(self.vectorizer.get_feature_names_out())} features")
                 
                 # Load embeddings
                 try:
@@ -100,16 +88,16 @@ class TFIDFPaperSearch:
                         self.paper_embeddings = pickle.load(f)
                     self.logger.info(f"✅ Embeddings loaded - shape: {self.paper_embeddings.shape}")
                 except Exception as e:
-                    self.logger.error(f"Failed to load embeddings: {e}")
+                    self.logger.error(f"Failed to load embeddings from {self.config.embeddings_path}: {e}")
                     return False
                 
                 # Load metadata
                 try:
-                    with open(self.config.metadata_path, 'r') as f:
+                    with open(self.config.metadata_path, 'r', encoding='utf-8') as f:
                         self.paper_metadata = json.load(f)
                     self.logger.info(f"✅ Metadata loaded - {len(self.paper_metadata)} papers")
                 except Exception as e:
-                    self.logger.error(f"Failed to load metadata: {e}")
+                    self.logger.error(f"Failed to load metadata from {self.config.metadata_path}: {e}")
                     return False
                 
                 # Verify data consistency
@@ -117,248 +105,71 @@ class TFIDFPaperSearch:
                     self.logger.error(f"Data size mismatch: metadata={len(self.paper_metadata)}, embeddings={self.paper_embeddings.shape[0]}")
                     return False
                 
-                # Test the vectorizer
+                # Build PyNNDescent index
+                self.logger.info("Building PyNNDescent index...")
                 try:
-                    test_vector = self.vectorizer.transform(["test query"])
-                    self.logger.info(f"✅ Vectorizer test successful - output shape: {test_vector.shape}")
-                    
-                    self._collection_ready = True
-                    self.logger.info(f"🚀 TF-IDF system ready with {len(self.paper_metadata)} papers")
-                    return True
+                    # Using 'cosine' metric for normalized embeddings
+                    self.pynndescent_index = pynndescent.NNDescent(
+                        self.paper_embeddings,
+                        metric='cosine', # Use cosine similarity for normalized embeddings
+                        n_neighbors=15,  # Number of neighbors to explore during graph building
+                        n_trees=10,      # Number of random projection trees for initialization
+                        random_state=42
+                    )
+                    self.pynndescent_index.prepare() # Build the index
+                    self.logger.info("✅ PyNNDescent index built successfully")
                 except Exception as e:
-                    self.logger.error(f"Vectorizer test failed: {e}")
+                    self.logger.error(f"Failed to build PyNNDescent index: {e}")
                     return False
+
+                self._collection_ready = True
+                self.logger.info(f"🚀 Embedding search system ready with {len(self.paper_metadata)} papers")
+                return True
             else:
-                self.logger.info("❌ TF-IDF files not found - will need to build database")
+                self.logger.info("❌ Embedding files not found - please run create_embeddings.py first.")
                 
         except Exception as e:
-            self.logger.error(f"Failed to load existing TF-IDF data: {e}")
+            self.logger.error(f"Failed to load existing embedding data or build index: {e}")
             import traceback
             self.logger.error(f"Load traceback: {traceback.format_exc()}")
         
         return False
     
-    def create_paper_database(self):
-        """Create TF-IDF searchable database"""
-        try:
-            if not Path(self.config.db_path).exists():
-                self.logger.error(f"SQLite database not found at {self.config.db_path}")
-                return False
-            
-            self.logger.info("Creating TF-IDF search database...")
-            
-            # Get all publications
-            with sqlite3.connect(self.config.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    SELECT p.id, p.pmid, p.title, p.abstract, p.journal, p.publication_date,
-                           GROUP_CONCAT(a.name, '; ') as authors,
-                           GROUP_CONCAT(a.standardized_name, '; ') as std_authors,
-                           GROUP_CONCAT(a.department, '; ') as departments
-                    FROM publications p
-                    JOIN author_publications ap ON p.id = ap.publication_id
-                    JOIN authors a ON ap.author_id = a.id
-                    WHERE p.abstract IS NOT NULL AND LENGTH(p.abstract) > 100
-                    GROUP BY p.id
-                    ORDER BY p.publication_date DESC
-                    LIMIT 3000
-                ''')  # Limit for faster processing and reasonable size
-                publications = cursor.fetchall()
-            
-            if not publications:
-                self.logger.error("No publications found in database")
-                return False
-            
-            self.logger.info(f"Processing {len(publications)} publications...")
-            
-            # Prepare documents and metadata
-            documents = []
-            metadata = []
-            
-            def clean_text(text):
-                """Clean text for TF-IDF processing"""
-                if not text:
-                    return ""
-                # Simple but effective cleaning
-                text = str(text).replace('\x00', ' ').replace('\r', ' ').replace('\n', ' ')
-                text = ' '.join(text.split())
-                # Keep reasonable length for TF-IDF
-                if len(text) > 3000:
-                    text = text[:3000]
-                return text.strip()
-            
-            valid_count = 0
-            for i, pub in enumerate(publications):
-                try:
-                    pub_id, pmid, title, abstract, journal, pub_date, authors, std_authors, departments = pub
-                    
-                    # Clean text fields
-                    title_clean = clean_text(title)
-                    abstract_clean = clean_text(abstract)
-                    
-                    if not title_clean and not abstract_clean:
-                        continue
-                    
-                    # Create searchable text - optimized for TF-IDF
-                    if title_clean and abstract_clean:
-                        # Include title multiple times for higher weight in TF-IDF
-                        search_text = f"{title_clean} {title_clean} {abstract_clean}"
-                    else:
-                        search_text = title_clean or abstract_clean
-                    
-                    if len(search_text.strip()) < 30:
-                        continue
-                    
-                    documents.append(search_text)
-                    metadata.append({
-                        'pub_id': str(pub_id),
-                        'pmid': str(pmid) if pmid else '',
-                        'title': title_clean,
-                        'journal': clean_text(journal),
-                        'publication_date': str(pub_date) if pub_date else '',
-                        'authors': clean_text(authors),
-                        'std_authors': clean_text(std_authors),
-                        'departments': clean_text(departments)
-                    })
-                    valid_count += 1
-                    
-                    if valid_count % 100 == 0:
-                        self.logger.info(f"Processed {valid_count} publications...")
-                        
-                except Exception as e:
-                    self.logger.warning(f"Error processing publication {i}: {e}")
-                    continue
-            
-            if not documents:
-                self.logger.error("No valid documents to process")
-                return False
-            
-            if len(documents) < 10:
-                self.logger.error(f"Too few documents ({len(documents)}) for reliable TF-IDF")
-                return False
-            
-            self.logger.info(f"Creating TF-IDF vectors for {len(documents)} documents...")
-            
-            # Create TF-IDF vectorizer with optimized settings
-            self.vectorizer = TfidfVectorizer(
-                max_features=8000,      # Good balance of features
-                stop_words='english',   # Remove common words
-                ngram_range=(1, 2),     # Include single words and bigrams
-                min_df=2,               # Ignore rare terms
-                max_df=0.95,            # Ignore too common terms
-                sublinear_tf=True,      # Use log scaling
-                norm='l2'               # L2 normalization
-            )
-            
-            # Fit and transform documents
-            try:
-                self.paper_embeddings = self.vectorizer.fit_transform(documents)
-                self.paper_metadata = metadata
-                
-                # Verify vectorizer is properly fitted
-                if not hasattr(self.vectorizer, 'idf_'):
-                    self.logger.error("Vectorizer fitting failed - no IDF computed")
-                    return False
-                
-                self.logger.info(f"TF-IDF vectorizer fitted with {len(self.vectorizer.get_feature_names_out())} features")
-                
-            except Exception as e:
-                self.logger.error(f"Failed to fit TF-IDF vectorizer: {e}")
-                return False
-            
-            # Save the vectorizer and embeddings for future use
-            try:
-                self.logger.info("Saving TF-IDF search data to disk...")
-                
-                with open(self.config.vectorizer_path, 'wb') as f:
-                    pickle.dump(self.vectorizer, f)
-                
-                with open(self.config.embeddings_path, 'wb') as f:
-                    pickle.dump(self.paper_embeddings, f)
-                
-                with open(self.config.metadata_path, 'w') as f:
-                    json.dump(self.paper_metadata, f)
-                    
-                self.logger.info("TF-IDF search data saved successfully")
-                
-            except Exception as e:
-                self.logger.warning(f"Failed to save TF-IDF data: {e}")
-                # Continue anyway since we have it in memory
-            
-            self._collection_ready = True
-            self.logger.info(f"✅ Created TF-IDF search database with {len(documents)} papers")
-            
-            # Test the vectorizer
-            try:
-                test_query = "machine learning"
-                test_vector = self.vectorizer.transform([test_query])
-                self.logger.info(f"✅ TF-IDF vectorizer test successful (query: '{test_query}')")
-            except Exception as e:
-                self.logger.error(f"TF-IDF vectorizer test failed: {e}")
-                return False
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to create TF-IDF search database: {e}")
-            import traceback
-            self.logger.error(f"Traceback: {traceback.format_exc()}")
-            return False
-    
     def search_with_smart_filtering(self, query: str) -> List[Dict]:
-        """Search using TF-IDF similarity with auto-initialization"""
-        # Auto-initialize if needed
+        """Search using embedding similarity with auto-initialization"""
+        # Auto-initialize if needed (though typically pre-built in deployment)
         if not self._collection_ready:
-            if os.environ.get("PORT"):  # In deployment
-                self.logger.error("No pre-built search database found in deployment")
-                self.logger.error("Please build database locally and include in repository")
-                return []
-            else:
-                self.logger.info("Auto-initializing TF-IDF search database...")
-                if self.create_paper_database():
-                    self._collection_ready = True
-                    self.logger.info("Auto-initialization successful")
-                else:
-                    self.logger.error("Auto-initialization failed")
-                    return []
-        
-        # Double-check that vectorizer is properly fitted
-        if not self.vectorizer:
-            self.logger.error("TF-IDF vectorizer not available")
+            self.logger.error("Search system not initialized. Please ensure embedding files are present.")
             return []
-            
-        if not hasattr(self.vectorizer, 'idf_'):
-            self.logger.error("TF-IDF vectorizer not fitted - rebuilding...")
-            # Try to rebuild
-            if not os.environ.get("PORT"):  # Only in local environment
-                if self.create_paper_database():
-                    self._collection_ready = True
-                    self.logger.info("Rebuild successful")
-                else:
-                    self.logger.error("Rebuild failed")
-                    return []
-            else:
-                self.logger.error("Cannot rebuild in deployment environment")
-                return []
         
-        if self.paper_embeddings is None:
-            self.logger.error("Paper embeddings not available")
+        if self.embedding_model is None or self.pynndescent_index is None:
+            self.logger.error("Embedding model or PyNNDescent index not available.")
             return []
         
         try:
             self.logger.info(f"Searching papers for: '{query}'")
             
-            # Transform query using fitted vectorizer
-            query_vector = self.vectorizer.transform([query])
+            # Embed the query
+            query_embedding = self.embedding_model.encode([query], convert_to_numpy=True)
+            # Normalize query embedding (important for cosine similarity)
+            query_embedding = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
             
-            # Calculate similarities
-            similarities = cosine_similarity(query_vector, self.paper_embeddings).flatten()
+            # Find nearest neighbors using PyNNDescent
+            # k is the number of neighbors to retrieve for the query
+            neighbors, distances = self.pynndescent_index.query(query_embedding, k=self.config.max_results * 10) # Fetch more to filter
             
-            # Get relevant papers
+            # neighbors is a 2D array, distances is a 2D array
+            # We are querying a single item, so take the first row [0]
+            nearest_indices = neighbors[0]
+            # PyNNDescent's 'cosine' metric returns cosine distance (1 - cosine similarity)
+            # So, convert back to cosine similarity: 1 - distance
+            similarities = 1 - distances[0] 
+            
             relevant_papers = []
-            for i, similarity in enumerate(similarities):
+            for i, idx in enumerate(nearest_indices):
+                similarity = similarities[i]
                 if similarity >= self.config.similarity_threshold:
-                    metadata = self.paper_metadata[i]
+                    metadata = self.paper_metadata[idx]
                     relevant_papers.append({
                         'similarity': float(similarity),
                         'title': metadata['title'],
@@ -368,7 +179,7 @@ class TFIDFPaperSearch:
                         'pmid': metadata['pmid']
                     })
             
-            # Sort by similarity
+            # Sort by similarity (PyNNDescent results are generally sorted but re-sort after filtering)
             relevant_papers.sort(key=lambda x: x['similarity'], reverse=True)
             
             self.logger.info(f"Found {len(relevant_papers)} relevant papers (threshold: {self.config.similarity_threshold})")
@@ -385,7 +196,7 @@ class TFIDFPaperSearch:
             return self._analyze_author_relevance(relevant_papers, query)
             
         except Exception as e:
-            self.logger.error(f"TF-IDF search failed: {e}")
+            self.logger.error(f"Embedding search failed: {e}")
             import traceback
             self.logger.error(f"Search traceback: {traceback.format_exc()}")
             return []
@@ -419,16 +230,16 @@ class TFIDFPaperSearch:
             avg_similarity = sum(similarities) / len(similarities)
             max_similarity = max(similarities)
             
-            # TF-IDF expertise score (adjusted for TF-IDF characteristics)
-            # TF-IDF similarities are generally lower than neural embeddings
-            volume_score = min(relevant_count / 5, 1.0)  # Scale for TF-IDF (was /8)
-            quality_score = min(avg_similarity * 3, 1.0)  # Boost TF-IDF scores more (was *2)
-            high_quality_count = sum(1 for s in similarities if s > 0.15)  # Lower threshold (was 0.3)
-            excellence_bonus = high_quality_count * 0.2  # Higher bonus (was 0.15)
+            # Expertise score for SentenceTransformer embeddings
+            # These similarities are typically higher than TF-IDF
+            volume_score = min(relevant_count / 8, 1.0)  # Scale based on number of relevant papers
+            quality_score = min(avg_similarity * 2, 1.0)  # Weight by average similarity
+            high_quality_count = sum(1 for s in similarities if s > 0.65) # Count papers with very high similarity
+            excellence_bonus = high_quality_count * 0.1 # Bonus for highly relevant papers
             
             expertise_score = (
-                volume_score * 0.4 +
-                quality_score * 0.5 +
+                volume_score * 0.5 +
+                quality_score * 0.4 +
                 excellence_bonus
             )
             
@@ -489,7 +300,8 @@ class TFIDFPaperSearch:
                 ''', (standardized_name,))
                 result = cursor.fetchone()
                 return result[0] if result and result[0] else 0
-        except:
+        except Exception as e:
+            self.logger.error(f"Error getting total papers for {standardized_name}: {e}")
             return 0
     
     def _get_author_details(self, standardized_name: str) -> Optional[Dict]:
@@ -560,15 +372,15 @@ class TFIDFPaperSearch:
         return None
 
 # Initialize FastAPI
-app = FastAPI(title="MGH/BWH/MGB Researcher Query Tool (TF-IDF)", version="1.0.0")
+app = FastAPI(title="MGH/BWH/MGB Researcher Query Tool (Embeddings)", version="1.0.0")
 templates = Jinja2Templates(directory="templates")
 
 # Initialize search system
 try:
-    paper_search = TFIDFPaperSearch(QueryConfig())
-    print("✓ TF-IDF Paper Search initialized successfully")
+    paper_search = EmbeddingPaperSearch(QueryConfig())
+    print("✓ Embedding Paper Search initialized successfully")
 except Exception as e:
-    print(f"✗ Failed to initialize TF-IDF Paper Search: {e}")
+    print(f"✗ Failed to initialize Embedding Paper Search: {e}")
     paper_search = None
 
 # For local development
@@ -579,13 +391,13 @@ if __name__ == "__main__":
     # Get port from environment variable (Render sets this) or default to 8000
     port = int(os.environ.get("PORT", 8000))
     
-    print("🚀 Starting TF-IDF Paper Search System...")
+    print("🚀 Starting Embedding Paper Search System...")
     print(f"📍 Access: http://localhost:{port}")
     
     if paper_search and paper_search._collection_ready:
         print(f"✅ Search ready with {len(paper_search.paper_metadata)} papers")
     else:
-        print("⚠️  Search database needs initialization")
+        print("⚠️  Search database needs pre-built embedding files. Run create_embeddings.py first.")
     
     uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
 
@@ -595,24 +407,23 @@ async def index(request: Request):
 
 @app.post("/initialize")
 async def initialize_paper_db():
-    """Initialize the TF-IDF database (force rebuild)"""
+    """Attempt to initialize the embedding database (will only load pre-built files)"""
     try:
         if not paper_search:
             return InitializeResponse(success=False, error="Search system not initialized")
         
-        # Force rebuild even in deployment if explicitly requested
-        success = paper_search.create_paper_database()
+        # This endpoint will now just try to load the pre-built embeddings
+        success = paper_search._load_existing_data()
         if success:
-            paper_search._collection_ready = True
-            return InitializeResponse(success=True, message="TF-IDF search database created successfully")
+            return InitializeResponse(success=True, message="Embedding search database loaded successfully")
         else:
-            return InitializeResponse(success=False, error="Failed to create search database")
+            return InitializeResponse(success=False, error="Failed to load search database. Ensure pre-built files exist.")
     except Exception as e:
         return InitializeResponse(success=False, error=str(e))
 
 @app.post("/search")
 async def search(search_request: SearchRequest):
-    """Search for researchers based on query using TF-IDF"""
+    """Search for researchers based on query using embeddings"""
     try:
         if not paper_search:
             raise HTTPException(status_code=503, detail="Search system not initialized")
@@ -628,14 +439,14 @@ async def search(search_request: SearchRequest):
             'query': query,
             'results': results,
             'total_found': len(results),
-            'search_type': 'tfidf_keyword_search'
+            'search_type': 'embedding_semantic_search'
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/adjust_thresholds")
 async def adjust_thresholds(
-    similarity_threshold: float = 0.05,
+    similarity_threshold: float = 0.4, # Default adjusted for embeddings
     min_relevant_papers: int = 1
 ):
     """Temporarily adjust search thresholds for testing"""
@@ -673,6 +484,14 @@ async def debug_files():
             return {"exists": True, "size_mb": round(size_mb, 2)}
         else:
             return {"exists": False, "size_mb": 0}
+            
+    def get_dir_info(path):
+        p = Path(path)
+        if p.is_dir():
+            size_bytes = sum(f.stat().st_size for f in p.glob('**/*') if f.is_file())
+            return {"exists": True, "size_mb": round(size_bytes / (1024 * 1024), 2)}
+        else:
+            return {"exists": False, "size_mb": 0}
     
     # List all files in current directory
     current_files = []
@@ -685,19 +504,20 @@ async def debug_files():
             })
     
     return {
-        "tfidf_files": {
-            "vectorizer": get_file_info(config.vectorizer_path),
-            "embeddings": get_file_info(config.embeddings_path),
-            "metadata": get_file_info(config.metadata_path)
+        "embedding_files": {
+            "model_directory": get_dir_info(config.model_path),
+            "embeddings_pkl": get_file_info(config.embeddings_path),
+            "metadata_json": get_file_info(config.metadata_path)
         },
         "sqlite_database": get_file_info(config.db_path),
         "all_files": sorted(current_files, key=lambda x: x['name']),
         "search_system_status": {
             "initialized": paper_search is not None,
             "collection_ready": paper_search._collection_ready if paper_search else False,
-            "has_vectorizer": paper_search.vectorizer is not None if paper_search else False,
+            "has_embedding_model": paper_search.embedding_model is not None if paper_search else False,
             "has_embeddings": paper_search.paper_embeddings is not None if paper_search else False,
-            "has_metadata": paper_search.paper_metadata is not None if paper_search else False
+            "has_metadata": paper_search.paper_metadata is not None if paper_search else False,
+            "has_pynndescent_index": paper_search.pynndescent_index is not None if paper_search else False
         }
     }
 
@@ -707,9 +527,9 @@ async def health():
     collection_ready = paper_search._collection_ready if paper_search else False
     is_deployment = bool(os.environ.get("PORT"))
     
-    # Check if we have pre-built TF-IDF files
+    # Check if we have pre-built embedding files
     has_prebuilt = (
-        Path(QueryConfig().vectorizer_path).exists() and
+        Path(QueryConfig().model_path).exists() and
         Path(QueryConfig().embeddings_path).exists() and
         Path(QueryConfig().metadata_path).exists()
     )
@@ -717,11 +537,11 @@ async def health():
     return {
         "status": "healthy",
         "search_system_available": paper_search is not None,
-        "search_type": "tfidf",
+        "search_type": "embedding_semantic_search",
         "database_path": QueryConfig().db_path,
         "database_exists": os.path.exists(QueryConfig().db_path),
         "collection_ready": collection_ready,
         "is_deployment": is_deployment,
         "has_prebuilt_database": has_prebuilt,
-        "auto_initialization": "disabled_in_deployment" if is_deployment else "enabled_locally"
+        "auto_initialization": "disabled_in_deployment" # Embeddings are always pre-built
     }

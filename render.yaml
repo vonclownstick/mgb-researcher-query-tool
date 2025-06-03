@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: mgh-researcher-query-tool
+    name: mgb-researcher-query-tool
     env: python
     region: oregon
     plan: free
