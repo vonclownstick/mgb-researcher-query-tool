@@ -13,9 +13,9 @@ import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
-# New imports for SentenceTransformers and PyNNDescent
+# New imports for SentenceTransformers
 from sentence_transformers import SentenceTransformer
-import pynndescent
+# Removed: import pynndescent # No longer needed
 from sklearn.metrics.pairwise import cosine_similarity # Still used for calculating similarity from embeddings
 
 # Pydantic models for request/response
@@ -36,10 +36,10 @@ class QueryConfig:
     embeddings_path: str = "./all-MiniLM-L6-v2_embeddings.pkl"
     metadata_path: str = "./paper_metadata.json"
     max_results: int = 5
-    similarity_threshold: float = 0.4  # Adjusted for SentenceTransformer embeddings (typically higher than TF-IDF)
+    similarity_threshold: float = 0.55  # Adjusted for SentenceTransformer embeddings (typically higher than TF-IDF)
     min_relevant_papers: int = 1  # Allow single-paper authors
 
-class EmbeddingPaperSearch:
+class EmbeddingPaperSearch: # Class name remains the same
     """Sentence-Transformer embedding based paper search - reliable and fast"""
     
     def __init__(self, config: QueryConfig):
@@ -48,7 +48,7 @@ class EmbeddingPaperSearch:
         self.embedding_model = None
         self.paper_embeddings = None
         self.paper_metadata = None
-        self.pynndescent_index = None # PyNNDescent index
+        # Removed: self.pynndescent_index = None # PyNNDescent index no longer needed
         self._collection_ready = False
         self._load_existing_data()
     
@@ -57,7 +57,7 @@ class EmbeddingPaperSearch:
         self.logger = logging.getLogger(__name__)
     
     def _load_existing_data(self):
-        """Load existing SentenceTransformer model, embeddings, and build PyNNDescent index"""
+        """Load existing SentenceTransformer model and embeddings"""
         try:
             self.logger.info(f"Looking for embedding files:")
             self.logger.info(f"  Model directory: {self.config.model_path} - {'EXISTS' if Path(self.config.model_path).exists() else 'MISSING'}")
@@ -105,22 +105,15 @@ class EmbeddingPaperSearch:
                     self.logger.error(f"Data size mismatch: metadata={len(self.paper_metadata)}, embeddings={self.paper_embeddings.shape[0]}")
                     return False
                 
-                # Build PyNNDescent index
-                self.logger.info("Building PyNNDescent index...")
-                try:
-                    # Using 'cosine' metric for normalized embeddings
-                    self.pynndescent_index = pynndescent.NNDescent(
-                        self.paper_embeddings,
-                        metric='cosine', # Use cosine similarity for normalized embeddings
-                        n_neighbors=15,  # Number of neighbors to explore during graph building
-                        n_trees=10,      # Number of random projection trees for initialization
-                        random_state=42
-                    )
-                    self.pynndescent_index.prepare() # Build the index
-                    self.logger.info("✅ PyNNDescent index built successfully")
-                except Exception as e:
-                    self.logger.error(f"Failed to build PyNNDescent index: {e}")
-                    return False
+                # Removed: Building PyNNDescent index
+                # self.logger.info("Building PyNNDescent index...")
+                # try:
+                #     self.pynndescent_index = pynndescent.NNDescent(...)
+                #     self.pynndescent_index.prepare()
+                #     self.logger.info("✅ PyNNDescent index built successfully")
+                # except Exception as e:
+                #     self.logger.error(f"Failed to build PyNNDescent index: {e}")
+                #     return False
 
                 self._collection_ready = True
                 self.logger.info(f"🚀 Embedding search system ready with {len(self.paper_metadata)} papers")
@@ -129,7 +122,7 @@ class EmbeddingPaperSearch:
                 self.logger.info("❌ Embedding files not found - please run create_embeddings.py first.")
                 
         except Exception as e:
-            self.logger.error(f"Failed to load existing embedding data or build index: {e}")
+            self.logger.error(f"Failed to load existing embedding data: {e}") # Removed "or build index"
             import traceback
             self.logger.error(f"Load traceback: {traceback.format_exc()}")
         
@@ -142,8 +135,8 @@ class EmbeddingPaperSearch:
             self.logger.error("Search system not initialized. Please ensure embedding files are present.")
             return []
         
-        if self.embedding_model is None or self.pynndescent_index is None:
-            self.logger.error("Embedding model or PyNNDescent index not available.")
+        if self.embedding_model is None or self.paper_embeddings is None: # Changed condition
+            self.logger.error("Embedding model or paper embeddings not available.")
             return []
         
         try:
@@ -154,20 +147,23 @@ class EmbeddingPaperSearch:
             # Normalize query embedding (important for cosine similarity)
             query_embedding = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
             
-            # Find nearest neighbors using PyNNDescent
-            # k is the number of neighbors to retrieve for the query
-            neighbors, distances = self.pynndescent_index.query(query_embedding, k=self.config.max_results * 10) # Fetch more to filter
+            # --- Brute-force Cosine Similarity Calculation ---
+            # Calculate cosine similarity between the query embedding and all paper embeddings
+            # The result is a 1D array of similarities
+            similarities = cosine_similarity(query_embedding, self.paper_embeddings).flatten()
             
-            # neighbors is a 2D array, distances is a 2D array
-            # We are querying a single item, so take the first row [0]
-            nearest_indices = neighbors[0]
-            # PyNNDescent's 'cosine' metric returns cosine distance (1 - cosine similarity)
-            # So, convert back to cosine similarity: 1 - distance
-            similarities = 1 - distances[0] 
+            # Get the indices of the top N results based on similarity
+            # Use argpartition for efficiency if only top_N is needed, then sort those N
+            # For 2799, full argsort is also fine, but argpartition is more scalable
+            top_indices_unsorted = np.argpartition(similarities, -self.config.max_results * 10)[-self.config.max_results * 10:] # Get more than max_results
+            
+            # Sort these top indices by their similarity values
+            top_indices = top_indices_unsorted[np.argsort(similarities[top_indices_unsorted])][::-1]
+            # ----------------------------------------------------
             
             relevant_papers = []
-            for i, idx in enumerate(nearest_indices):
-                similarity = similarities[i]
+            for i, idx in enumerate(top_indices):
+                similarity = similarities[idx]
                 if similarity >= self.config.similarity_threshold:
                     metadata = self.paper_metadata[idx]
                     relevant_papers.append({
@@ -179,7 +175,7 @@ class EmbeddingPaperSearch:
                         'pmid': metadata['pmid']
                     })
             
-            # Sort by similarity (PyNNDescent results are generally sorted but re-sort after filtering)
+            # Sort by similarity (important as argpartition doesn't guarantee sorted order of the top N)
             relevant_papers.sort(key=lambda x: x['similarity'], reverse=True)
             
             self.logger.info(f"Found {len(relevant_papers)} relevant papers (threshold: {self.config.similarity_threshold})")
@@ -234,12 +230,12 @@ class EmbeddingPaperSearch:
             # These similarities are typically higher than TF-IDF
             volume_score = min(relevant_count / 8, 1.0)  # Scale based on number of relevant papers
             quality_score = min(avg_similarity * 2, 1.0)  # Weight by average similarity
-            high_quality_count = sum(1 for s in similarities if s > 0.65) # Count papers with very high similarity
-            excellence_bonus = high_quality_count * 0.1 # Bonus for highly relevant papers
+            high_quality_count = sum(1 for s in similarities if s > 0.7) # Count papers with very high similarity
+            excellence_bonus = high_quality_count * 0.15 # Bonus for highly relevant papers
             
             expertise_score = (
-                volume_score * 0.5 +
-                quality_score * 0.4 +
+                volume_score * 0.4 +
+                quality_score * 0.5 +
                 excellence_bonus
             )
             
@@ -446,7 +442,7 @@ async def search(search_request: SearchRequest):
 
 @app.post("/adjust_thresholds")
 async def adjust_thresholds(
-    similarity_threshold: float = 0.4, # Default adjusted for embeddings
+    similarity_threshold: float = 0.55, # Default adjusted for embeddings
     min_relevant_papers: int = 1
 ):
     """Temporarily adjust search thresholds for testing"""
@@ -517,7 +513,7 @@ async def debug_files():
             "has_embedding_model": paper_search.embedding_model is not None if paper_search else False,
             "has_embeddings": paper_search.paper_embeddings is not None if paper_search else False,
             "has_metadata": paper_search.paper_metadata is not None if paper_search else False,
-            "has_pynndescent_index": paper_search.pynndescent_index is not None if paper_search else False
+            # Removed: "has_pynndescent_index"
         }
     }
 
@@ -537,11 +533,12 @@ async def health():
     return {
         "status": "healthy",
         "search_system_available": paper_search is not None,
-        "search_type": "embedding_semantic_search",
+        "search_type": "embedding_semantic_search_brute_force", # Updated search type
         "database_path": QueryConfig().db_path,
         "database_exists": os.path.exists(QueryConfig().db_path),
         "collection_ready": collection_ready,
         "is_deployment": is_deployment,
         "has_prebuilt_database": has_prebuilt,
         "auto_initialization": "disabled_in_deployment" # Embeddings are always pre-built
+    }
     }

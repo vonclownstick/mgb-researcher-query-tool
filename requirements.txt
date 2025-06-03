@@ -8,5 +8,4 @@ requests==2.31.0
 scikit-learn==1.6.0
 sentence-transformers>=2.7.0
 huggingface_hub>=0.23.0
-pynndescent==0.5.10
 tqdm==4.66.1
